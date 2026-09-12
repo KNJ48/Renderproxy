@@ -10,17 +10,36 @@ http.createServer(async (req, res) => {
   const urlObj = new URL(req.url, `http://${req.headers.host}`);
   const pathPart = urlObj.pathname.slice(1); // 先頭の "/" を削る
 
-  let targetUrl = "";
+  // ----------------------------------------------------
+  // 1. フォームからURLが送信（POST）された場合の処理
+  // ----------------------------------------------------
+  if (req.method === "POST" && urlObj.pathname === "/set-target") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => {
+      const params = new URLSearchParams(body);
+      let inputUrl = params.get("url") || "";
+      if (!inputUrl.startsWith("http")) inputUrl = "https://" + inputUrl;
+
+      const parsedTarget = new URL(inputUrl);
+      lastBaseUrl = parsedTarget.origin; // ドメインを記憶
+
+      console.log(`🚀 ターゲットを設定しました: ${lastBaseUrl}`);
+      
+      // 【修正箇所】リダイレクトせず、そのままそのサイトのトップページ（/）をすぐにfetchしてブラウザに返す！
+      fetchAndForward(lastBaseUrl, req, res);
+    });
+    return;
+  }
 
   // ----------------------------------------------------
-  // 1. 【ここが核心】パスなし（＝リロード、またはトップへのアクセス）の処理
+  // 2. ブラウザがトップページ（パスなし）を通常読み込み・リロードした場合
   // ----------------------------------------------------
   if (!pathPart) {
-    // 記憶していたドメインを綺麗さっぱり消し去る（完全リセット）
+    // 記憶を完全に消去してリセットする
     lastBaseUrl = "";
-    console.log("🧹 リロードされたため、記憶を完全に消去しました。");
+    console.log("🧹 リロードまたはトップアクセスにより、記憶を完全に消去しました。");
 
-    // URL入力画面を表示
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(`
       <!DOCTYPE html>
@@ -50,43 +69,22 @@ http.createServer(async (req, res) => {
   }
 
   // ----------------------------------------------------
-  // 2. フォームからURLが送信された場合の処理
-  // ----------------------------------------------------
-  if (req.method === "POST" && urlObj.pathname === "/set-target") {
-    let body = "";
-    req.on("data", chunk => { body += chunk; });
-    req.on("end", () => {
-      const params = new URLSearchParams(body);
-      let inputUrl = params.get("url") || "";
-      if (!inputUrl.startsWith("http")) inputUrl = "https://" + inputUrl;
-
-      const parsedTarget = new URL(inputUrl);
-      lastBaseUrl = parsedTarget.origin; // ドメインを記憶
-
-      console.log(`🚀 ターゲットを設定: ${lastBaseUrl}`);
-      
-      // 登録したら、アドレスバーのURLを汚さないように「/」にリダイレクトしてページを表示させる
-      res.writeHead(302, { "Location": "/" });
-      res.end();
-    });
-    return;
-  }
-
-  // ----------------------------------------------------
-  // 3. 通信の振り分け（画像やCSSなどの裏の通信を流す）
+  // 3. 通信の振り分け（画像やCSS、ページ内のリンク移動など）
   // ----------------------------------------------------
   if (lastBaseUrl) {
-    // 記憶しておいたドメインのあとに、届いたパスとクエリをそのまま合体
-    targetUrl = `${lastBaseUrl}/${pathPart}${urlObj.search}`;
+    const targetUrl = `${lastBaseUrl}/${pathPart}${urlObj.search}`;
     console.log(` └ 転送: ${targetUrl}`);
+    fetchAndForward(targetUrl, req, res);
   } else {
-    res.writeHead(400); res.end("セッションがありません。トップページからやり直してください。");
-    return;
+    res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+    res.end("セッションがありません。上のリロードボタンを押してやり直してください。");
   }
+}).listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 
-  // ----------------------------------------------------
-  // 4. ターゲットのサイトへ通信を横流し
-  // ----------------------------------------------------
+// 通信を横流しする共通関数
+function fetchAndForward(targetUrl, req, res) {
   try {
     const client = targetUrl.startsWith("https") ? https : http;
     const headers = { ...req.headers };
@@ -102,6 +100,4 @@ http.createServer(async (req, res) => {
   } catch (err) {
     res.writeHead(500); res.end("エラーが発生しました。");
   }
-}).listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+}
