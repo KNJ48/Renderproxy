@@ -3,8 +3,8 @@ import https from 'https';
 
 const PORT = process.env.PORT || 3000;
 
-// ステートレス：ユーザーごとのURLをサーバー側に記憶しない。
-// URL情報は /p/<Base64URL>/... の中に含める。
+// サーバー側にユーザーごとのURLを記憶しない
+// URL情報は /p/<Base64URL>/... の中に含める
 
 function decodeBase64Url(encoded) {
   let value = encoded
@@ -23,7 +23,7 @@ function encodeBase64Url(text) {
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
-    .replace(/=+$/, '');
+    .replace(/=+$/g, '');
 }
 
 function viewerHtml() {
@@ -98,20 +98,11 @@ button {
     placeholder="https://example.com"
   >
 
-  <button id="open">
-    開く
-  </button>
-
-  <button id="reload">
-    再読み込み
-  </button>
+  <button id="open">開く</button>
+  <button id="reload">再読み込み</button>
 </div>
 
-<iframe
-  id="frame"
-  title="Proxy Viewer"
->
-</iframe>
+<iframe id="frame" title="Proxy Viewer"></iframe>
 
 <script>
 const input = document.getElementById('url');
@@ -127,9 +118,9 @@ function encodeBase64Url(text) {
   }
 
   return btoa(binary)
-    .replace(/\\\\+/g, '-')
-    .replace(/\\\\//g, '_')
-    .replace(/=+$/, '');
+    .replace(/\\+/g, '-')
+    .replace(/\\//g, '_')
+    .replace(/=+$/g, '');
 }
 
 function openUrl() {
@@ -139,7 +130,7 @@ function openUrl() {
     return;
   }
 
-  if (!/^https?:\\\\/\\\\//i.test(value)) {
+  if (!/^https?:\\/\\//i.test(value)) {
     value = 'https://' + value;
     input.value = value;
   }
@@ -157,9 +148,7 @@ function openUrl() {
       return;
     }
 
-    frame.src =
-      '/p/' +
-      encodeBase64Url(url.href);
+    frame.src = '/p/' + encodeBase64Url(url.href);
 
   } catch {
     alert('URLが正しくありません。');
@@ -215,10 +204,7 @@ http.createServer((req, res) => {
   }
 
   // /p/<Base64URL>/path
-  const parts = pathname
-    .slice(3)
-    .split('/');
-
+  const parts = pathname.slice(3).split('/');
   const encodedTarget = parts.shift();
 
   if (!encodedTarget) {
@@ -227,7 +213,7 @@ http.createServer((req, res) => {
     return;
   }
 
-  // Base64URL → 元URL
+  // Base64URLを元のURLに戻す
   let baseUrl;
 
   try {
@@ -281,87 +267,85 @@ http.createServer((req, res) => {
         ? https
         : http;
 
-    // リクエストヘッダーをコピー
+    // 元のリクエストヘッダーをコピー
     const headers = {
       ...req.headers
     };
 
-    // プロキシ側では不要
     delete headers.host;
     delete headers.referer;
 
-    client
-      .get(
-        targetUrl.href,
-        { headers },
-        targetRes => {
+    client.get(
+      targetUrl.href,
+      { headers },
+      targetRes => {
 
-          const responseHeaders = {
-            ...targetRes.headers
-          };
+        const responseHeaders = {
+          ...targetRes.headers
+        };
 
-          // iframeを拒否するヘッダーを削除
-          delete responseHeaders['x-frame-options'];
+        // iframe拒否を解除
+        delete responseHeaders['x-frame-options'];
 
-          // CSPの frame-ancestors を削除
-          if (
+        // CSPのframe-ancestorsを削除
+        if (
+          responseHeaders['content-security-policy']
+        ) {
+          responseHeaders['content-security-policy'] =
             responseHeaders['content-security-policy']
-          ) {
-            responseHeaders['content-security-policy'] =
-              responseHeaders['content-security-policy']
-                .split(';')
-                .filter(
-                  rule =>
-                    !rule
-                      .trim()
-                      .toLowerCase()
-                      .startsWith('frame-ancestors')
-                )
-                .join(';');
-          }
-
-          // リダイレクト先もプロキシURLへ変換
-          if (responseHeaders.location) {
-            try {
-              const redirected = new URL(
-                responseHeaders.location,
-                targetUrl.href
-              );
-
-              responseHeaders.location =
-                '/p/' +
-                encodeBase64Url(redirected.origin) +
-                redirected.pathname +
-                redirected.search;
-
-            } catch {
-              // URLとして解釈できない場合はそのまま
-            }
-          }
-
-          res.writeHead(
-            targetRes.statusCode || 200,
-            responseHeaders
-          );
-
-          targetRes.pipe(res);
+              .split(';')
+              .filter(rule =>
+                !rule
+                  .trim()
+                  .toLowerCase()
+                  .startsWith('frame-ancestors')
+              )
+              .join(';');
         }
-      )
-      .on('error', error => {
-        console.error(
-          'Target request error:',
-          error
+
+        // リダイレクト先をプロキシURLに変換
+        if (responseHeaders.location) {
+          try {
+            const redirected = new URL(
+              responseHeaders.location,
+              targetUrl.href
+            );
+
+            responseHeaders.location =
+              '/p/' +
+              encodeBase64Url(redirected.origin) +
+              redirected.pathname +
+              redirected.search;
+
+          } catch {
+            // 変換できない場合はそのまま
+          }
+        }
+
+        res.writeHead(
+          targetRes.statusCode || 200,
+          responseHeaders
         );
 
-        if (!res.headersSent) {
-          res.writeHead(502);
-          res.end(
-            'ターゲットサイトとの通信に失敗しました。'
-          );
-        }
-      });
+        targetRes.pipe(res);
+      }
+    ).on('error', error => {
+
+      console.error(
+        'Target request error:',
+        error
+      );
+
+      if (!res.headersSent) {
+        res.writeHead(502);
+        res.end(
+          'ターゲットサイトとの通信に失敗しました。'
+        );
+      }
+    });
 
   } catch (error) {
+
     console.error(
       'Proxy error:',
       error
@@ -375,11 +359,8 @@ http.createServer((req, res) => {
     }
   }
 
-}).listen(
-  PORT,
-  () => {
-    console.log(
-      `Server running on port ${PORT}`
-    );
-  }
-);
+}).listen(PORT, () => {
+  console.log(
+    `Server running on port ${PORT}`
+  );
+});
