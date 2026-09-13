@@ -11,6 +11,7 @@ const html = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
   <title>Web Proxy Viewer</title>
 
   <style>
@@ -32,10 +33,13 @@ const html = `<!DOCTYPE html>
     #topbar {
       width: 100%;
       height: 52px;
+
       display: flex;
       align-items: center;
       gap: 8px;
+
       padding: 8px 10px;
+
       background: #1b1b1b;
       border-bottom: 1px solid #333;
     }
@@ -43,12 +47,16 @@ const html = `<!DOCTYPE html>
     #urlInput {
       flex: 1;
       min-width: 0;
+
       height: 36px;
       padding: 0 12px;
+
       border: 1px solid #444;
       border-radius: 6px;
+
       background: #252525;
       color: white;
+
       font-size: 14px;
       outline: none;
     }
@@ -60,10 +68,13 @@ const html = `<!DOCTYPE html>
     #openButton {
       height: 36px;
       padding: 0 15px;
+
       border: none;
       border-radius: 6px;
+
       background: #3a3a3a;
       color: white;
+
       cursor: pointer;
       font-size: 14px;
     }
@@ -74,9 +85,12 @@ const html = `<!DOCTYPE html>
 
     #frame {
       display: block;
+
       width: 100%;
       height: calc(100% - 52px);
+
       border: none;
+
       background: white;
     }
   </style>
@@ -99,8 +113,8 @@ const html = `<!DOCTYPE html>
   <iframe
     id="frame"
     src="about:blank"
-    allowfullscreen
-  ></iframe>
+    allowfullscreen>
+  </iframe>
 
   <script>
     const PROXY_URL = ${JSON.stringify(PROXY_URL)};
@@ -144,6 +158,9 @@ const html = `<!DOCTYPE html>
       const proxyUrl =
         PROXY_URL.replace(/\\/$/, "") + "/" + encodedUrl;
 
+      console.log("Target URL:", targetUrl);
+      console.log("Proxy URL:", proxyUrl);
+
       frame.src = proxyUrl;
     }
 
@@ -160,6 +177,7 @@ const html = `<!DOCTYPE html>
 </html>`;
 
 const server = http.createServer((req, res) => {
+
   if (req.url === "/" || req.url === "/index.html") {
     res.writeHead(200, {
       "Content-Type": "text/html; charset=utf-8",
