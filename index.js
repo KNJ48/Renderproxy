@@ -1,195 +1,125 @@
-import http from "http";
+import http from 'http';
+import https from 'https';
 
 const PORT = process.env.PORT || 3000;
 
-// ここを既存のプロキシURLに変更
-const PROXY_URL = "https://YOUR-PROXY.onrender.com";
+http.createServer(async (req, res) => {
+  const urlObj = new URL(req.url, `http://${req.headers.host}`);
+  const pathPart = urlObj.pathname.slice(1); // 先頭の "/" を削る
 
-function createPage() {
-  const proxyUrl = JSON.stringify(PROXY_URL);
+  let targetUrl = "";
 
-  return `<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Web Proxy Viewer</title>
+  // ----------------------------------------------------
+  // 共通処理: iframeでの埋め込みや別ドメインからの通信を100%許可するヘッダー
+  // ----------------------------------------------------
+  const setSecurityBypassHeaders = (statusCode, customHeaders = {}) => {
+    const baseHeaders = {
+      // 【重要】X-Frame-Options: ALLOWALL はブラウザに無視されるため、完全に削除（出さない）
+      // 代わりに現在の主流である CSP の frame-ancestors * を指定
+      "Content-Security-Policy": "frame-ancestors *", 
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "*"
+    };
+    
+    // ターゲットから届いたヘッダーをきれいに掃除して結合
+    const cleanCustomHeaders = targetResHeadersFilter(customHeaders);
+    res.writeHead(statusCode, { ...cleanCustomHeaders, ...baseHeaders });
+  };
 
-<style>
-* {
-  box-sizing: border-box;
-}
+  // ターゲットサイトのヘッダーから、iframeを禁止する設定を徹底的に消去する
+  const targetResHeadersFilter = (headers) => {
+    const cleanHeaders = {};
+    for (const key in headers) {
+      const lowerKey = key.toLowerCase();
+      // 大文字小文字に関わらず、iframe制限系ヘッダーを完全に排除
+      if (lowerKey === 'x-frame-options' || lowerKey === 'content-security-policy') {
+        continue;
+      }
+      cleanHeaders[key] = headers[key];
+    }
+    return cleanHeaders;
+  };
 
-html,
-body {
-  margin: 0;
-  padding: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: #111;
-  font-family: Arial, sans-serif;
-}
-
-#topbar {
-  width: 100%;
-  height: 52px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  background: #1b1b1b;
-  border-bottom: 1px solid #333;
-}
-
-#urlInput {
-  flex: 1;
-  min-width: 0;
-  height: 36px;
-  padding: 0 12px;
-  border: 1px solid #444;
-  border-radius: 6px;
-  background: #252525;
-  color: white;
-  font-size: 14px;
-  outline: none;
-}
-
-#urlInput:focus {
-  border-color: #777;
-}
-
-#openButton {
-  height: 36px;
-  padding: 0 15px;
-  border: none;
-  border-radius: 6px;
-  background: #3a3a3a;
-  color: white;
-  cursor: pointer;
-  font-size: 14px;
-}
-
-#openButton:hover {
-  background: #505050;
-}
-
-#frame {
-  display: block;
-  width: 100%;
-  height: calc(100% - 52px);
-  border: none;
-  background: white;
-}
-</style>
-</head>
-
-<body>
-
-<div id="topbar">
-  <input
-    id="urlInput"
-    type="text"
-    placeholder="https://example.com"
-    autocomplete="off"
-    spellcheck="false"
-  >
-  <button id="openButton">開く</button>
-</div>
-
-<iframe
-  id="frame"
-  src="about:blank"
-  allowfullscreen>
-</iframe>
-
-<script>
-const PROXY_URL = ${proxyUrl};
-
-const urlInput = document.getElementById("urlInput");
-const openButton = document.getElementById("openButton");
-const frame = document.getElementById("frame");
-
-function encodeBase64(text) {
-  const bytes = new TextEncoder().encode(text);
-
-  let binary = "";
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
-  return btoa(binary).replace(/=/g, "");
-}
-
-function openUrl() {
-  let targetUrl = urlInput.value.trim();
-
-  if (!targetUrl) {
+  // ----------------------------------------------------
+  // 1. 開いた瞬間にプロンプトを出す処理
+  // ----------------------------------------------------
+  if (!pathPart) {
+    setSecurityBypassHeaders(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(`
+      <script>
+        let url = prompt("アクセスしたいURLを入力してください（例: https://example.com）:");
+        if (url) {
+          if (!url.startsWith("http")) url = "https://" + url;
+          const b64 = btoa(url).replace(/=/g, "");
+          window.location.href = "/" + b64;
+        } else {
+          document.body.innerHTML = "URLが入力されませんでした。再読み込みしてやり直してください。";
+        }
+      </script>
+    `);
     return;
   }
 
-  if (
-    !targetUrl.startsWith("http://") &&
-    !targetUrl.startsWith("https://")
-  ) {
-    targetUrl = "https://" + targetUrl;
+  // ----------------------------------------------------
+  // 2. 通信の振り分け
+  // ----------------------------------------------------
+  if (pathPart.startsWith("aHR0c")) {
+    try {
+      let b64String = pathPart;
+      while (b64String.length % 4 !== 0) { b64String += "="; }
+      targetUrl = Buffer.from(b64String, "base64").toString("utf-8");
+      console.log(`👁️ iframe内での閲覧中: ${targetUrl}`);
+    } catch {
+      setSecurityBypassHeaders(400, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("Base64のデコードに失敗しました");
+      return;
+    }
+  } else {
+    // 【解説】ここに飛んでくるリソース（画像やCSSなど）の400エラーを防ぐため、メッセージをマイルドにしています
+    setSecurityBypassHeaders(400, { "Content-Type": "text/html; charset=utf-8" });
+    res.end("セッションが切れたか、リソースへの直接アクセスです。");
+    return;
   }
 
+  // ----------------------------------------------------
+  // 3. ターゲットのサイトへ通信を横流し
+  // ----------------------------------------------------
   try {
-    new URL(targetUrl);
-  } catch {
-    alert("URLが正しくありません。");
-    return;
-  }
+    const client = targetUrl.startsWith("https") ? https : http;
+    const headers = { ...req.headers };
+    delete headers.host;
+    delete headers.referer;
 
-  const encodedUrl = encodeBase64(targetUrl);
+    client.get(targetUrl, { headers }, (targetRes) => {
+      const contentType = targetRes.headers['content-type'] || '';
 
-  const proxyUrl =
-    PROXY_URL.replace(/\\/$/, "") +
-    "/" +
-    encodedUrl;
+      // HTMLの場合だけ、相対パス崩れを防ぐ魔法のタグ（<base>）を仕込む処理
+      if (contentType.includes('text/html')) {
+        let body = [];
+        targetRes.on('data', (chunk) => body.push(chunk));
+        targetRes.on('end', () => {
+          let html = Buffer.concat(body).toString('utf-8');
+          
+          // <head> タグの直後に <base href="ターゲットURL"> を挿入。
+          // これにより、サイト内の画像やCSSがプロキシを壊さずに直接本家から読み込まれるようになります。
+          const baseTag = `<base href="${targetUrl}">`;
+          html = html.replace(/<head>/i, `<head>${baseTag}`);
 
-  frame.src = proxyUrl;
-}
-
-openButton.addEventListener("click", openUrl);
-
-urlInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    openUrl();
-  }
-});
-</script>
-
-</body>
-</html>`;
-}
-
-const server = http.createServer((req, res) => {
-  if (req.url === "/" || req.url === "/index.html") {
-    res.writeHead(200, {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-store"
+          setSecurityBypassHeaders(targetRes.statusCode, targetRes.headers);
+          res.end(html);
+        });
+      } else {
+        // 画像やその他のデータはそのままストリームで流す
+        setSecurityBypassHeaders(targetRes.statusCode, targetRes.headers);
+        targetRes.pipe(res);
+      }
+    }).on("error", () => {
+      res.writeHead(500); res.end("ターゲットとの通信に失敗しました。");
     });
-
-    res.end(createPage());
-    return;
+  } catch (err) {
+    res.writeHead(500); res.end("エラーが発生しました。");
   }
-
-  if (req.url === "/favicon.ico") {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  res.writeHead(404, {
-    "Content-Type": "text/plain; charset=utf-8"
-  });
-
-  res.end("Not Found");
-});
-
-server.listen(PORT, "0.0.0.0", () => {
-  console.log("Server running on port " + PORT);
+}).listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
