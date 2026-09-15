@@ -77,7 +77,10 @@ http.createServer(async (req, res) => {
 
     delete headers.host;
     delete headers.referer;
-
+　　delete headers["sec-fetch-dest"];
+　　delete headers["sec-fetch-mode"];
+　　delete headers["sec-fetch-site"];
+　　delete headers["sec-fetch-storage-access"];
     // HTMLを加工できるよう、圧縮されていない状態で受け取る
     headers["accept-encoding"] = "identity";
 
