@@ -1,10 +1,11 @@
 {
   "name": "render-b64-proxy",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "check": "node --check index.js"
   },
   "engines": {
     "node": ">=22 <27"
