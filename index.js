@@ -5,8 +5,7 @@ import net from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 3000);
-
-const VERSION = "3.3.0";
+const VERSION = "3.4.0";
 
 const MAX_HTML = 8 * 1024 * 1024;
 const MAX_WS_MESSAGE = 2 * 1024 * 1024;
@@ -17,7 +16,6 @@ const MAX_WEBSOCKETS = 15;
 
 let httpCount = 0;
 let wsCount = 0;
-
 let activeRequests = 0;
 let activeWebSockets = 0;
 
@@ -78,29 +76,18 @@ function proxyPath(url) {
   return "/" + encodeURL(url);
 }
 
-// =====================================================
-// URL RESOLUTION
-// =====================================================
-
 function getTarget(req) {
-  const requestURL = new URL(
-    req.url,
-    "http://localhost"
-  );
-
+  const requestURL = new URL(req.url, "http://localhost");
   const encoded = requestURL.pathname.slice(1);
 
   if (!encoded) return null;
 
   const decoded = decodeURL(encoded);
-
   const target = normalizeTargetURL(decoded);
 
-  // Base64の後ろに付いたクエリも維持
+  // Base64の後ろに付いたクエリも転送
   if (requestURL.search) {
-    const extra = new URLSearchParams(
-      requestURL.search
-    );
+    const extra = new URLSearchParams(requestURL.search);
 
     for (const [key, value] of extra) {
       target.searchParams.append(key, value);
@@ -155,7 +142,6 @@ function validateHostname(hostname) {
     if (!isPublicIPv4(host)) {
       throw new Error("Forbidden IP");
     }
-
     return;
   }
 
@@ -182,45 +168,29 @@ function safeLookup(hostname, options, callback) {
       } else {
         callback(null, hostname, 4);
       }
-
       return;
     }
 
-    dns.lookup(
-      hostname,
-      {
-        all: true,
-        family: 4
-      },
-      (error, addresses) => {
-        if (error) {
-          callback(error);
-          return;
-        }
-
-        if (
-          !addresses.length ||
-          addresses.some(
-            item => !isPublicIPv4(item.address)
-          )
-        ) {
-          callback(
-            new Error("Unsafe DNS result")
-          );
-          return;
-        }
-
-        if (options?.all) {
-          callback(null, addresses);
-        } else {
-          callback(
-            null,
-            addresses[0].address,
-            4
-          );
-        }
+    dns.lookup(hostname, { all: true, family: 4 }, (error, addresses) => {
+      if (error) {
+        callback(error);
+        return;
       }
-    );
+
+      if (
+        !addresses.length ||
+        addresses.some(item => !isPublicIPv4(item.address))
+      ) {
+        callback(new Error("Unsafe DNS result"));
+        return;
+      }
+
+      if (options?.all) {
+        callback(null, addresses);
+      } else {
+        callback(null, addresses[0].address, 4);
+      }
+    });
 
   } catch (error) {
     callback(error);
@@ -247,12 +217,10 @@ function createRuntime(targetURL) {
   "use strict";
 
   if (window.__B64_PROXY_INSTALLED__) return;
-
   window.__B64_PROXY_INSTALLED__ = true;
 
   const TARGET_URL = __TARGET_URL__;
   const ORIGINAL = new URL(TARGET_URL);
-
   const PROXY_ORIGIN = location.origin;
 
   const NativeWebSocket = window.WebSocket;
@@ -297,7 +265,6 @@ function createRuntime(targetURL) {
         return url.href;
       }
 
-      // location.originで作ったURLを元サイトへ補正
       if (url.origin === PROXY_ORIGIN) {
         url.protocol = ORIGINAL.protocol;
         url.host = ORIGINAL.host;
@@ -324,7 +291,6 @@ function createRuntime(targetURL) {
     try {
       const url = new URL(value, TARGET_URL);
 
-      // v3.2で動作確認できたWSS補正
       if (url.host === location.host) {
         url.host = ORIGINAL.host;
       }
@@ -425,7 +391,7 @@ function createRuntime(targetURL) {
     );
   };
 
-  console.log("[PROXY] Runtime v3.3 installed");
+  console.log("[PROXY] Runtime v3.4 installed");
 })();
 `;
 
@@ -470,26 +436,19 @@ function rewriteHTML(html, targetURL) {
     }
   }
 
-  // CSP meta
   html = html.replace(
     /<meta\b[^>]*http-equiv\s*=\s*["']?\s*(?:content-security-policy|x-frame-options)[^>]*>/gi,
     ""
   );
 
-  // base
-  html = html.replace(
-    /<base\b[^>]*>/gi,
-    ""
-  );
+  html = html.replace(/<base\b[^>]*>/gi, "");
 
-  // HTML attributes
   html = html.replace(
     /\b(href|src|action|poster|data-src)\s*=\s*(["'])(.*?)\2/gi,
     (match, attr, quote, value) =>
       attr + "=" + quote + convert(value) + quote
   );
 
-  // srcset
   html = html.replace(
     /\bsrcset\s*=\s*(["'])(.*?)\1/gi,
     (match, quote, value) => {
@@ -497,7 +456,6 @@ function rewriteHTML(html, targetURL) {
         value.split(",").map(item => {
           const parts = item.trim().match(/^(\S+)(\s+.*)?$/);
           if (!parts) return item;
-
           return convert(parts[1]) + (parts[2] || "");
         }).join(", ") +
         quote;
@@ -540,6 +498,182 @@ function cleanHeaders(headers) {
 }
 
 // =====================================================
+// NEW: HOME PAGE WITH URL INPUT
+// =====================================================
+
+const homeHTML = String.raw`
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Render Base64 Proxy</title>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #101218;
+  color: #f5f5f5;
+  font-family: Arial, sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.container {
+  width: min(90%, 650px);
+  text-align: center;
+}
+
+h1 {
+  margin-bottom: 12px;
+  font-size: 30px;
+}
+
+.description {
+  color: #aeb5c5;
+  margin-bottom: 28px;
+}
+
+.form {
+  display: flex;
+  gap: 10px;
+}
+
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 15px;
+  background: #1c202b;
+  color: white;
+  border: 1px solid #343b4b;
+  border-radius: 8px;
+  outline: none;
+  font-size: 16px;
+}
+
+input:focus {
+  border-color: #5f8cff;
+}
+
+button {
+  padding: 15px 25px;
+  background: #426bdf;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: bold;
+}
+
+button:hover {
+  background: #557ff3;
+}
+
+.info {
+  margin-top: 24px;
+  font-size: 13px;
+  color: #7e879a;
+}
+
+@media (max-width: 500px) {
+  .form {
+    flex-direction: column;
+  }
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+  <h1>Render Base64 Proxy</h1>
+
+  <p class="description">
+    URLを入力するとプロキシ経由で開きます。
+  </p>
+
+  <form class="form" id="proxyForm">
+
+    <input
+      id="url"
+      type="text"
+      placeholder="example.com"
+      autocomplete="url"
+      required
+    >
+
+    <button type="submit">
+      OPEN
+    </button>
+
+  </form>
+
+  <div class="info">
+    HTTP / HTTPS / WebSocket 対応
+    <br>
+    Base64 URL方式
+  </div>
+
+</div>
+
+<script>
+document.getElementById("proxyForm").addEventListener(
+  "submit",
+  function(event) {
+    event.preventDefault();
+
+    try {
+      let input = document.getElementById("url").value.trim();
+
+      if (!/^https?:\/\//i.test(input)) {
+        input = "https://" + input;
+      }
+
+      const url = new URL(input);
+
+      if (
+        url.protocol !== "http:" &&
+        url.protocol !== "https:"
+      ) {
+        throw new Error("HTTP/HTTPS以外のURLは指定できません");
+      }
+
+      const bytes = new TextEncoder().encode(url.href);
+
+      let binary = "";
+
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+
+      const encoded = btoa(binary)
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/g, "");
+
+      location.href = "/" + encoded;
+
+    } catch (error) {
+      alert("URLエラー: " + error.message);
+    }
+  }
+);
+</script>
+
+</body>
+</html>
+`;
+
+// =====================================================
 // HTTP SERVER
 // =====================================================
 
@@ -569,15 +703,13 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // HOME PAGE
   if (requestURL.pathname === "/") {
     res.writeHead(200, {
       "content-type": "text/html; charset=utf-8"
     });
 
-    res.end(
-      "Base64化したURLをドメインの後ろに付けてアクセスしてください。"
-    );
-
+    res.end(homeHTML);
     return;
   }
 
@@ -621,10 +753,7 @@ const server = http.createServer((req, res) => {
 
   const id = ++httpCount;
 
-  log(
-    "HTTP",
-    `#${id} ${req.method} ${target.href}`
-  );
+  log("HTTP", `#${id} ${req.method} ${target.href}`);
 
   const client =
     target.protocol === "https:" ? https : http;
@@ -658,12 +787,10 @@ const server = http.createServer((req, res) => {
     {
       method: req.method,
       headers,
-
       agent:
         target.protocol === "https:"
           ? httpsAgent
           : httpAgent,
-
       timeout: 30000
     },
     upstreamRes => {
@@ -707,7 +834,7 @@ const server = http.createServer((req, res) => {
         }
       }
 
-      // Non-HTML
+      // NON-HTML
       if (!isHTML) {
         res.writeHead(status, responseHeaders);
         upstreamRes.pipe(res);
@@ -741,11 +868,8 @@ const server = http.createServer((req, res) => {
         if (exceeded) return;
 
         try {
-          const html =
-            Buffer.concat(chunks).toString("utf8");
-
-          const modified =
-            rewriteHTML(html, target.href);
+          const html = Buffer.concat(chunks).toString("utf8");
+          const modified = rewriteHTML(html, target.href);
 
           responseHeaders["content-type"] =
             "text/html; charset=utf-8";
@@ -780,10 +904,7 @@ const server = http.createServer((req, res) => {
       });
 
       upstreamRes.on("close", () => {
-        if (
-          !upstreamRes.complete &&
-          !res.writableEnded
-        ) {
+        if (!upstreamRes.complete && !res.writableEnded) {
           if (!res.headersSent) {
             res.writeHead(502);
           }
@@ -833,14 +954,9 @@ const wss = new WebSocketServer({
 
 server.on("upgrade", (req, socket, head) => {
   try {
-    const requestURL = new URL(
-      req.url,
-      "http://localhost"
-    );
+    const requestURL = new URL(req.url, "http://localhost");
 
-    if (
-      !requestURL.pathname.startsWith("/__proxy_ws/")
-    ) {
+    if (!requestURL.pathname.startsWith("/__proxy_ws/")) {
       socket.destroy();
       return;
     }
@@ -850,6 +966,7 @@ server.on("upgrade", (req, socket, head) => {
         "HTTP/1.1 503 Service Unavailable\r\n" +
         "Connection: close\r\n\r\n"
       );
+
       socket.destroy();
       return;
     }
@@ -869,12 +986,7 @@ server.on("upgrade", (req, socket, head) => {
     validateHostname(target.hostname);
 
     wss.handleUpgrade(req, socket, head, clientWS => {
-      wss.emit(
-        "connection",
-        clientWS,
-        req,
-        target.href
-      );
+      wss.emit("connection", clientWS, req, target.href);
     });
 
   } catch (error) {
@@ -885,7 +997,6 @@ server.on("upgrade", (req, socket, head) => {
 
 wss.on("connection", (clientWS, req, targetURL) => {
   const id = ++wsCount;
-
   activeWebSockets++;
 
   log("WS OPEN", `#${id} ${targetURL}`);
@@ -962,9 +1073,7 @@ wss.on("connection", (clientWS, req, targetURL) => {
     for (const item of pending) {
       if (upstreamWS.readyState !== WebSocket.OPEN) break;
 
-      upstreamWS.send(item.data, {
-        binary: item.isBinary
-      });
+      upstreamWS.send(item.data, { binary: item.isBinary });
     }
 
     pending.length = 0;
@@ -1044,7 +1153,7 @@ wss.on("connection", (clientWS, req, targetURL) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log("");
   console.log("====================================");
-  console.log(" Render Base64 Proxy v3.3");
+  console.log(" Render Base64 Proxy v3.4");
   console.log("====================================");
   console.log("");
   console.log("PORT:", PORT);
@@ -1054,6 +1163,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("Legacy /Base64 URLs: ENABLED");
   console.log("Query Parameters: ENABLED");
   console.log("HTTPS Auto Prefix: ENABLED");
+  console.log("URL Input Homepage: ENABLED");
   console.log("Previous-site memory: DISABLED");
   console.log("PROXY_TOKEN: NOT REQUIRED");
   console.log("");
