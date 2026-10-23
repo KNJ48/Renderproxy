@@ -5,7 +5,7 @@ import net from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = "4.1.0-test";
+const VERSION = "4.2.0-test";
 
 const MAX_HTML = 8 * 1024 * 1024;
 const MAX_REQUESTS = 40;
@@ -39,7 +39,7 @@ function encodeURL(value) {
 }
 
 function decodeURL(value) {
-  if (!/^[A-Za-z0-9+_=-]+$/.test(value)) {
+  if (!/^[A-Za-z0-9+/_=-]+$/.test(value)) {
     throw new Error("Invalid Base64");
   }
 
@@ -141,6 +141,8 @@ function safeLookup(hostname, options, callback) {
     options = {};
   }
 
+  options ||= {};
+
   try {
     validateHostname(hostname);
 
@@ -195,7 +197,7 @@ const httpsAgent = new https.Agent({
 });
 
 // ==================================================
-// BROWSER RUNTIME
+// BROWSER RUNTIME v4.2
 // ==================================================
 
 function createRuntime(targetURL) {
@@ -212,6 +214,20 @@ function createRuntime(targetURL) {
   const PROXY_ORIGIN = location.origin;
 
   const NativeWebSocket = window.WebSocket;
+  const nativeOpen = window.open;
+
+  const nativeAnchorClick =
+    HTMLAnchorElement.prototype.click;
+
+  const nativeFormSubmit =
+    HTMLFormElement.prototype.submit;
+
+  const nativeFormRequestSubmit =
+    HTMLFormElement.prototype.requestSubmit;
+
+  // ==========================================
+  // BASE64
+  // ==========================================
 
   function encodeURL(value) {
     const bytes = new TextEncoder().encode(value);
@@ -228,26 +244,39 @@ function createRuntime(targetURL) {
       .replace(/=+$/g, "");
   }
 
+  function decodeURL(value) {
+    const normalized = value
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
+
+    return atob(
+      normalized.padEnd(
+        Math.ceil(normalized.length / 4) * 4,
+        "="
+      )
+    );
+  }
+
   // ==========================================
-  // URL CONVERSION
+  // URL DETECTION
   // ==========================================
 
   function isProxyPath(url) {
-    if (url.origin !== PROXY_ORIGIN) return false;
+    if (url.origin !== PROXY_ORIGIN) {
+      return false;
+    }
 
     const match = url.pathname.match(
-      /^\/([A-Za-z0-9_-]+={0,2})$/
+      /^\/([A-Za-z0-9+/_-]+={0,2})$/
     );
 
     if (!match) return false;
 
     try {
-      const decoded = atob(
-        match[1].replace(/-/g, "+").replace(/_/g, "/")
-          .padEnd(Math.ceil(match[1].length / 4) * 4, "=")
-      );
+      const decoded = decodeURL(match[1]);
 
       return /^https?:\/\//i.test(decoded);
+
     } catch {
       return false;
     }
@@ -262,7 +291,7 @@ function createRuntime(targetURL) {
       return null;
     }
 
-    // location.originなどから生成されたURL
+    // Renderドメインを元サイトのドメインに補正
     if (url.origin === PROXY_ORIGIN) {
       url.protocol = ORIGINAL.protocol;
       url.host = ORIGINAL.host;
@@ -271,13 +300,17 @@ function createRuntime(targetURL) {
     return url;
   }
 
+  // ==========================================
+  // NAVIGATION CONVERSION
+  // ==========================================
+
   function convertNavigation(input) {
     const value = String(input);
 
     if (
       !value ||
       value.startsWith("#") ||
-      /^(javascript:|data:|blob:|mailto:|tel:)/i.test(value)
+      /^(javascript:|data:|blob:|mailto:|tel:|about:)/i.test(value)
     ) {
       return value;
     }
@@ -294,12 +327,319 @@ function createRuntime(targetURL) {
         return value;
       }
 
-      return PROXY_ORIGIN + "/" + encodeURL(target.href);
+      const converted =
+        PROXY_ORIGIN + "/" + encodeURL(target.href);
+
+      return converted;
 
     } catch (error) {
-      console.warn("[NAV ERROR]", error);
+      console.warn("[PROXY NAV ERROR]", error);
       return value;
     }
+  }
+
+  // ==========================================
+  // NAVIGATION LOG
+  // ==========================================
+
+  function logNavigation(type, original, converted) {
+    if (original === converted) return;
+
+    console.log(
+      "[PROXY NAV " + type + "]",
+      original,
+      "=>",
+      converted
+    );
+  }
+
+  // ==========================================
+  // LINK FIX
+  // ==========================================
+
+  function fixLink(link) {
+    if (!link) return;
+
+    const original = link.getAttribute("href");
+
+    if (!original) return;
+
+    const converted = convertNavigation(original);
+
+    if (converted === original) return;
+
+    link.setAttribute("href", converted);
+
+    logNavigation("LINK", original, converted);
+  }
+
+  // 通常のリンククリック
+  document.addEventListener(
+    "click",
+    function(event) {
+      const element = event.target;
+
+      if (!(element instanceof Element)) return;
+
+      const link = element.closest(
+        "a[href], area[href]"
+      );
+
+      if (!link) return;
+
+      fixLink(link);
+    },
+    true
+  );
+
+  // JavaScriptによる a.click()
+  HTMLAnchorElement.prototype.click = function() {
+    fixLink(this);
+
+    return nativeAnchorClick.call(this);
+  };
+
+  // ==========================================
+  // WINDOW.OPEN
+  // ==========================================
+
+  window.open = function(url, target, features) {
+    if (url === undefined || url === "") {
+      return nativeOpen.call(
+        window,
+        url,
+        target,
+        features
+      );
+    }
+
+    const converted = convertNavigation(url);
+
+    logNavigation("OPEN", url, converted);
+
+    return nativeOpen.call(
+      window,
+      converted,
+      target,
+      features
+    );
+  };
+
+  // ==========================================
+  // FORM FIX
+  // ==========================================
+
+  function fixForm(form, submitter) {
+    if (!(form instanceof HTMLFormElement)) return;
+
+    let original =
+      form.getAttribute("action") || TARGET_URL;
+
+    // submitボタンにformactionがある場合
+    if (
+      submitter &&
+      submitter.hasAttribute &&
+      submitter.hasAttribute("formaction")
+    ) {
+      const submitAction =
+        submitter.getAttribute("formaction");
+
+      const convertedSubmitAction =
+        convertNavigation(submitAction);
+
+      if (convertedSubmitAction !== submitAction) {
+        submitter.setAttribute(
+          "formaction",
+          convertedSubmitAction
+        );
+
+        logNavigation(
+          "FORMACTION",
+          submitAction,
+          convertedSubmitAction
+        );
+      }
+    }
+
+    const converted = convertNavigation(original);
+
+    if (converted === original) return;
+
+    form.setAttribute("action", converted);
+
+    logNavigation("FORM", original, converted);
+  }
+
+  // 通常のフォーム送信
+  document.addEventListener(
+    "submit",
+    function(event) {
+      const form = event.target;
+
+      if (!(form instanceof HTMLFormElement)) return;
+
+      fixForm(form, event.submitter);
+    },
+    true
+  );
+
+  // JavaScriptによる form.submit()
+  HTMLFormElement.prototype.submit = function() {
+    fixForm(this);
+
+    return nativeFormSubmit.call(this);
+  };
+
+  // JavaScriptによる form.requestSubmit()
+  if (nativeFormRequestSubmit) {
+    HTMLFormElement.prototype.requestSubmit =
+      function(submitter) {
+        fixForm(this, submitter);
+
+        if (submitter === undefined) {
+          return nativeFormRequestSubmit.call(this);
+        }
+
+        return nativeFormRequestSubmit.call(
+          this,
+          submitter
+        );
+      };
+  }
+
+  // ==========================================
+  // META REFRESH
+  // ==========================================
+
+  function fixMetaRefresh() {
+    const metas = document.querySelectorAll(
+      'meta[http-equiv="refresh" i]'
+    );
+
+    for (const meta of metas) {
+      const content = meta.getAttribute("content");
+
+      if (!content) continue;
+
+      const match = content.match(
+        /^(\s*\d+(?:\.\d+)?\s*;\s*url\s*=\s*)(.*)$/i
+      );
+
+      if (!match) continue;
+
+      const original = match[2]
+        .trim()
+        .replace(/^["']|["']$/g, "");
+
+      const converted = convertNavigation(original);
+
+      if (converted === original) continue;
+
+      meta.setAttribute(
+        "content",
+        match[1] + converted
+      );
+
+      logNavigation("META", original, converted);
+    }
+  }
+
+  // ==========================================
+  // IFRAME NAVIGATION
+  // ==========================================
+
+  function fixIframe(frame) {
+    if (!(frame instanceof HTMLIFrameElement)) {
+      return;
+    }
+
+    const original = frame.getAttribute("src");
+
+    if (!original) return;
+
+    const converted = convertNavigation(original);
+
+    if (converted === original) return;
+
+    frame.setAttribute("src", converted);
+
+    logNavigation("IFRAME", original, converted);
+  }
+
+  // ==========================================
+  // DYNAMIC NAVIGATION ELEMENTS
+  // ==========================================
+
+  function fixNavigationElements(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    // meta refresh
+    fixMetaRefresh();
+
+    // iframeのみ先行補正
+    // a[href]を一括変更するとサイトのJSに影響するため、
+    // 通常リンクはクリック時に変換する。
+    const frames = root.querySelectorAll("iframe[src]");
+
+    for (const frame of frames) {
+      fixIframe(frame);
+    }
+  }
+
+  function initializeNavigation() {
+    fixNavigationElements(document);
+
+    const observer = new MutationObserver(mutations => {
+      for (const mutation of mutations) {
+        if (mutation.type === "attributes") {
+          const element = mutation.target;
+
+          if (
+            element instanceof HTMLIFrameElement &&
+            mutation.attributeName === "src"
+          ) {
+            fixIframe(element);
+          }
+
+          if (
+            element instanceof HTMLMetaElement &&
+            (
+              mutation.attributeName === "content" ||
+              mutation.attributeName === "http-equiv"
+            )
+          ) {
+            fixMetaRefresh();
+          }
+
+          continue;
+        }
+
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof Element)) continue;
+
+          if (node instanceof HTMLIFrameElement) {
+            fixIframe(node);
+          }
+
+          if (node instanceof HTMLMetaElement) {
+            fixMetaRefresh();
+          }
+
+          fixNavigationElements(node);
+        }
+      }
+    });
+
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: [
+        "src",
+        "content",
+        "http-equiv"
+      ]
+    });
   }
 
   // ==========================================
@@ -310,6 +650,7 @@ function createRuntime(targetURL) {
     try {
       const url = new URL(String(input), TARGET_URL);
 
+      // location.host由来の接続先を補正
       if (url.host === location.host) {
         url.host = ORIGINAL.host;
       }
@@ -368,118 +709,23 @@ function createRuntime(targetURL) {
   }
 
   // ==========================================
-  // LINK NAVIGATION
+  // INITIALIZATION
   // ==========================================
-
-  document.addEventListener("click", function(event) {
-    const element = event.target;
-
-    if (!(element instanceof Element)) return;
-
-    const link = element.closest("a[href], area[href]");
-
-    if (!link) return;
-
-    const original = link.getAttribute("href");
-
-    if (!original) return;
-
-    const converted = convertNavigation(original);
-
-    if (converted === original) return;
-
-    console.log(
-      "[NAV LINK]",
-      original,
-      "=>",
-      converted
-    );
-
-    // 通常のブラウザ操作を維持するため、
-    // hrefだけ変更してクリック処理は止めない。
-    link.setAttribute("href", converted);
-
-  }, true);
-
-  // ==========================================
-  // FORM NAVIGATION
-  // ==========================================
-
-  document.addEventListener("submit", function(event) {
-    const form = event.target;
-
-    if (!(form instanceof HTMLFormElement)) return;
-
-    const original =
-      form.getAttribute("action") || TARGET_URL;
-
-    const converted = convertNavigation(original);
-
-    if (converted === original) return;
-
-    console.log(
-      "[NAV FORM]",
-      original,
-      "=>",
-      converted
-    );
-
-    form.setAttribute("action", converted);
-
-  }, true);
-
-  // ==========================================
-  // META REFRESH
-  // ==========================================
-
-  function fixMetaRefresh() {
-    const metas = document.querySelectorAll(
-      'meta[http-equiv="refresh" i]'
-    );
-
-    for (const meta of metas) {
-      const content = meta.getAttribute("content");
-
-      if (!content) continue;
-
-      const match = content.match(
-        /^(\s*\d+(?:\.\d+)?\s*;\s*url\s*=\s*)(.*)$/i
-      );
-
-      if (!match) continue;
-
-      const original = match[2].trim()
-        .replace(/^["']|["']$/g, "");
-
-      const converted = convertNavigation(original);
-
-      if (converted === original) continue;
-
-      meta.setAttribute(
-        "content",
-        match[1] + converted
-      );
-
-      console.log(
-        "[NAV META]",
-        original,
-        "=>",
-        converted
-      );
-    }
-  }
 
   if (document.readyState === "loading") {
     document.addEventListener(
       "DOMContentLoaded",
-      fixMetaRefresh,
+      initializeNavigation,
       { once: true }
     );
   } else {
-    fixMetaRefresh();
+    initializeNavigation();
   }
 
-  console.log("[PROXY] Runtime v4.1 TEST installed");
+  console.log(
+    "[PROXY] Runtime v4.2 TEST installed"
+  );
+
 })();
 `;
 
@@ -494,13 +740,13 @@ function createRuntime(targetURL) {
 // ==================================================
 
 function modifyHTML(html, req, targetURL) {
-  // 元のCSP meta削除処理
+  // CSP meta削除
   html = html.replace(
     /<meta\b[^>]*http-equiv\s*=\s*["']?\s*(?:content-security-policy|x-frame-options)\s*["']?[^>]*>/gi,
     ""
   );
 
-  // 元のbaseタグ方式
+  // 元のbaseタグ方式を維持
   const hasBaseTag = /<base\b[^>]*>/i.test(html);
 
   if (!hasBaseTag) {
@@ -518,7 +764,7 @@ function modifyHTML(html, req, targetURL) {
     );
   }
 
-  // meta refreshは、ブラウザが読み込む前に補正
+  // meta refreshをHTML段階で補正
   html = html.replace(
     /<meta\b[^>]*http-equiv\s*=\s*(["']?)refresh\1[^>]*>/gi,
     tag => {
@@ -531,7 +777,8 @@ function modifyHTML(html, req, targetURL) {
 
           if (!match) return attribute;
 
-          const destination = match[2].trim()
+          const destination = match[2]
+            .trim()
             .replace(/^["']|["']$/g, "");
 
           try {
@@ -541,7 +788,9 @@ function modifyHTML(html, req, targetURL) {
             );
 
             if (
-              !["http:", "https:"].includes(absolute.protocol)
+              !["http:", "https:"].includes(
+                absolute.protocol
+              )
             ) {
               return attribute;
             }
@@ -562,7 +811,7 @@ function modifyHTML(html, req, targetURL) {
     }
   );
 
-  // ナビゲーション監視 + WSS
+  // Runtime
   const runtime = createRuntime(targetURL)
     .replace(/<\/script/gi, "<\\/script");
 
@@ -691,7 +940,7 @@ button:hover {
 <div class="info">
 HTTP / HTTPS / WebSocket 対応
 <br>
-Navigation Protection TEST
+Navigation Protection v4.2 TEST
 </div>
 
 </div>
@@ -761,7 +1010,8 @@ const server = http.createServer((req, res) => {
   // Health check
   if (urlObj.pathname === "/__health") {
     res.writeHead(200, {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "cache-control": "no-store"
     });
 
     res.end(JSON.stringify({
@@ -776,10 +1026,21 @@ const server = http.createServer((req, res) => {
 
   const pathPart = urlObj.pathname.slice(1);
 
-  // Home
+  // ================================================
+  // HOME
+  // ================================================
+
   if (!pathPart) {
+    log(
+      "HOME",
+      `${req.method} ${req.url}`
+    );
+
     res.writeHead(200, {
-      "content-type": "text/html; charset=utf-8"
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store, max-age=0",
+      "pragma": "no-cache",
+      "expires": "0"
     });
 
     res.end(homeHTML);
@@ -846,7 +1107,10 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Concurrent request limit
+  // ================================================
+  // REQUEST LIMIT
+  // ================================================
+
   if (activeRequests >= MAX_REQUESTS) {
     res.writeHead(503);
     res.end("Too many requests");
@@ -892,6 +1156,10 @@ const server = http.createServer((req, res) => {
   if (headers.origin) {
     headers.origin = target.origin;
   }
+
+  // ================================================
+  // UPSTREAM REQUEST
+  // ================================================
 
   const upstream = client.request(
     target,
@@ -942,7 +1210,9 @@ const server = http.createServer((req, res) => {
           );
 
           if (
-            !["http:", "https:"].includes(redirect.protocol)
+            !["http:", "https:"].includes(
+              redirect.protocol
+            )
           ) {
             throw new Error("Unsupported redirect");
           }
@@ -1144,7 +1414,9 @@ server.on("upgrade", (req, socket, head) => {
     }
 
     const encoded =
-      requestURL.pathname.slice("/__proxy_ws/".length);
+      requestURL.pathname.slice(
+        "/__proxy_ws/".length
+      );
 
     const target = new URL(decodeURL(encoded));
 
@@ -1234,7 +1506,10 @@ wss.on("connection", (clientWS, req, targetURL) => {
   const pending = [];
   let pendingBytes = 0;
 
-  // Browser -> upstream
+  // ==========================================
+  // BROWSER -> UPSTREAM
+  // ==========================================
+
   clientWS.on("message", (data, isBinary) => {
     uploaded += data.length;
     messagesUp++;
@@ -1261,7 +1536,10 @@ wss.on("connection", (clientWS, req, targetURL) => {
     }
   });
 
-  // Connected
+  // ==========================================
+  // UPSTREAM CONNECTED
+  // ==========================================
+
   upstreamWS.on("open", () => {
     log(
       "WS CONNECTED",
@@ -1271,14 +1549,20 @@ wss.on("connection", (clientWS, req, targetURL) => {
     for (const item of pending) {
       if (upstreamWS.readyState !== WebSocket.OPEN) break;
 
-      upstreamWS.send(item.data, { binary: item.isBinary });
+      upstreamWS.send(
+        item.data,
+        { binary: item.isBinary }
+      );
     }
 
     pending.length = 0;
     pendingBytes = 0;
   });
 
-  // Upstream -> browser
+  // ==========================================
+  // UPSTREAM -> BROWSER
+  // ==========================================
+
   upstreamWS.on("message", (data, isBinary) => {
     downloaded += data.length;
     messagesDown++;
@@ -1290,10 +1574,16 @@ wss.on("connection", (clientWS, req, targetURL) => {
       return;
     }
 
-    clientWS.send(data, { binary: isBinary });
+    clientWS.send(
+      data,
+      { binary: isBinary }
+    );
   });
 
-  // Errors
+  // ==========================================
+  // ERRORS
+  // ==========================================
+
   upstreamWS.on("error", error => {
     log(
       "WS ERROR",
@@ -1312,7 +1602,10 @@ wss.on("connection", (clientWS, req, targetURL) => {
     );
   });
 
-  // Stats
+  // ==========================================
+  // STATS
+  // ==========================================
+
   const statsTimer = setInterval(() => {
     log(
       "WS STATS",
@@ -1327,8 +1620,10 @@ wss.on("connection", (clientWS, req, targetURL) => {
 
   function cleanup() {
     if (closed) return;
+
     closed = true;
     activeWebSockets--;
+
     clearInterval(statsTimer);
   }
 
@@ -1368,7 +1663,7 @@ wss.on("connection", (clientWS, req, targetURL) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log("");
   console.log("====================================");
-  console.log(" Render Base64 Proxy v4.1 TEST");
+  console.log(" Render Base64 Proxy v4.2 TEST");
   console.log("====================================");
   console.log("");
   console.log("PORT:", PORT);
@@ -1382,12 +1677,17 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("Navigation Protection:");
   console.log("  HTTP Redirect: ENABLED");
   console.log("  Link Click: ENABLED");
+  console.log("  Programmatic Link Click: ENABLED");
   console.log("  Form Submit: ENABLED");
+  console.log("  Programmatic Form Submit: ENABLED");
+  console.log("  Window Open: ENABLED");
   console.log("  Meta Refresh: ENABLED");
-  console.log("  JS location Redirect: NOT SUPPORTED");
+  console.log("  Iframe Navigation: PARTIAL");
+  console.log("  Direct JS Location Redirect: NOT SUPPORTED");
   console.log("");
   console.log("HTML Bulk Rewriting: DISABLED");
   console.log("WebSocket Host Fix: ENABLED");
+  console.log("Homepage Cache Control: ENABLED");
   console.log("");
   console.log("Server running!");
   console.log("");
