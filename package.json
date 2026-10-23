@@ -1,6 +1,6 @@
 {
   "name": "render-b64-proxy",
-  "version": "4.0.0",
+  "version": "4.1.0-test",
   "type": "module",
   "main": "index.js",
   "scripts": {
